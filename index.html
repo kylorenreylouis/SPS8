@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="ja"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>カメラ置きシューティング(対CPU)</title>
+<style>
+:root{--fg:#fff;--bg:#10131a;box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font-family:system-ui,sans-serif;overflow:hidden}
+canvas{display:block;width:100%;height:100%}
+#hud{position:fixed;left:12px;top:calc(env(safe-area-inset-top,0px) + 10px);font-size:16px;text-shadow:0 0 4px #000;pointer-events:none;line-height:1.6}
+#mode{font-weight:700;font-size:20px}
+#cross{position:fixed;left:50%;top:50%;width:8px;height:8px;margin:-4px;border:2px solid #fff;border-radius:50%;pointer-events:none}
+#msg{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:rgba(0,0,0,.72);text-align:center;font-size:17px;line-height:1.8;cursor:pointer}
+#msg h1{margin:0 0 8px}
+#vf{position:fixed;inset:0;pointer-events:none;box-shadow:inset 0 0 170px 45px rgba(0,0,0,.7);background:repeating-linear-gradient(0deg,rgba(0,0,0,.09) 0 1px,transparent 1px 3px);font-family:monospace;color:#fff;text-shadow:0 0 3px #000}#vf i{position:absolute;width:44px;height:44px;border:3px solid #fff;opacity:.85}#vf .a{left:5%;top:calc(env(safe-area-inset-top,0px) + 6%);border-right:0;border-bottom:0}#vf .b{right:5%;top:calc(env(safe-area-inset-top,0px) + 6%);border-left:0;border-bottom:0}#vf .c{left:5%;bottom:6%;border-right:0;border-top:0}#vf .d{right:5%;bottom:6%;border-left:0;border-top:0}#rec{position:absolute;right:8%;top:calc(env(safe-area-inset-top,0px) + 9%);font-size:20px;font-weight:700}#rec b{color:#f22;animation:bl 1s steps(2) infinite}@keyframes bl{50%{opacity:0}}#tc{position:absolute;right:8%;bottom:9%;font-size:18px}#wh{position:fixed;inset:0;background:#fff;opacity:0;pointer-events:none}#mm{width:176px;height:176px;position:fixed;right:10px;top:calc(env(safe-area-inset-top,0px) + 90px);display:none;border:2px solid #fff;border-radius:6px}#fx{position:fixed;left:12px;bottom:12px;font-size:15px;line-height:1.5;text-shadow:0 0 4px #000;pointer-events:none}#toast{position:fixed;left:50%;top:22%;transform:translateX(-50%);font-size:30px;font-weight:700;text-shadow:0 0 8px #000;opacity:0;transition:opacity .4s;pointer-events:none;white-space:nowrap}button{font-size:17px;padding:8px 16px;margin:4px;cursor:pointer}#dirt{position:fixed;inset:0;pointer-events:none;opacity:0;background:radial-gradient(circle at 20% 30%,rgba(60,40,20,.7) 0 9%,transparent 10%),radial-gradient(circle at 70% 65%,rgba(50,35,15,.7) 0 12%,transparent 13%),radial-gradient(circle at 85% 20%,rgba(60,40,20,.6) 0 7%,transparent 8%),rgba(210,215,220,.9)}#flash{position:fixed;inset:0;background:#f00;opacity:0;pointer-events:none;transition:opacity .25s}
+</style></head><body>
+<div id="hud"><div id="mode"></div><div id="hp"></div><div id="info"></div><div id="tip" style="opacity:.8"></div></div>
+<div id="cross"></div><div id="vf"><i class="a"></i><i class="b"></i><i class="c"></i><i class="d"></i><div id="rec"><b>●</b> REC</div><div id="tc"></div></div><div id="dirt"></div><div id="wh"></div><canvas id="mm" width="176" height="176"></canvas><div id="fx"></div><div id="toast"></div><div id="flash"></div>
+<div id="msg"><h1>カメラ置きシューティング</h1>
+<div>カメラを持っている間 → FPS視点(銃は持てない)<br>Cキーでカメラを床に置く → カメラ視点になり銃が使える<br>
+<b>WASD</b>移動 / <b>マウス</b>(または矢印キー)向き / <b>左クリック/Space</b>射撃 / <b>右クリック</b>照準レーザー / <b>C</b>置く・拾う(近くで)<br>
+剣を持った敵をすべて倒そう</div><p><button id="bCpu">対CPU</button><button id="bPvp">対人</button></p><div id="lobby" style="display:none"><input id="pname" maxlength="8" placeholder="あなたの名前" style="width:9em;font-size:17px"><br><button id="bMake">部屋を作る</button><button id="bJoin">部屋に参加</button><br><input id="code" maxlength="6" inputmode="numeric" placeholder="6桁コード" style="width:7em;font-size:17px"><button id="bGo" style="display:none">対戦開始(ホスト)</button><div id="lobbyMsg"></div></div></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mqtt@5.10.1/dist/mqtt.min.js"></script>
+<script>
+const $=id=>document.getElementById(id);
+const R=22; // アリーナ半径(正方形の半辺)
+const scene=new THREE.Scene();scene.background=new THREE.Color(0x10131a);scene.fog=new THREE.Fog(0x10131a,15,55);
+const cam=new THREE.PerspectiveCamera(62,1,.1,100);cam.rotation.order='YXZ';
+const ren=new THREE.WebGLRenderer({antialias:true});document.body.prepend(ren.domElement);
+function resize(){ren.setSize(innerWidth,innerHeight);cam.aspect=innerWidth/innerHeight;cam.updateProjectionMatrix()}
+addEventListener('resize',resize);resize();
+scene.add(cam);const knife3d=new THREE.Group();{const s=new THREE.Shape();s.moveTo(-.02,0);s.lineTo(-.02,.25);s.quadraticCurveTo(-.005,.31,0,.34);s.quadraticCurveTo(.024,.26,.024,.16);s.lineTo(.024,0);s.lineTo(-.02,0);
+const bg=new THREE.ExtrudeGeometry(s,{depth:.012,bevelEnabled:false});bg.rotateX(-Math.PI/2);bg.translate(0,-.006,0);
+const blade=new THREE.Mesh(bg,new THREE.MeshLambertMaterial({color:0xd8dde3,emissive:0x3a3f45}));
+const gold=new THREE.MeshLambertMaterial({color:0x8a6d2f,emissive:0x2a2008});
+const guard=new THREE.Mesh(new THREE.BoxGeometry(.075,.016,.018),gold);guard.position.set(0,0,.008);
+const grip=new THREE.Mesh(new THREE.CylinderGeometry(.017,.015,.13,10),new THREE.MeshLambertMaterial({color:0x2b1d14}));grip.rotation.x=Math.PI/2;grip.position.z=.08;
+const pom=new THREE.Mesh(new THREE.SphereGeometry(.021,10,8),gold);pom.position.z=.15;
+knife3d.add(blade,guard,grip,pom);knife3d.scale.setScalar(1.3)}cam.add(knife3d);
+scene.add(new THREE.HemisphereLight(0xffffff,0x334455,1.0));
+const sun=new THREE.DirectionalLight(0xffffff,.6);sun.position.set(10,20,5);scene.add(sun);
+const M=(c)=>new THREE.MeshLambertMaterial({color:c});
+const floor=new THREE.Mesh(new THREE.PlaneGeometry(R*2,R*2),M(0x2b3442));floor.rotation.x=-Math.PI/2;scene.add(floor);
+scene.add(new THREE.GridHelper(R*2,22,0x445066,0x333d4e));
+let WH=2;const N=8,CS=R*2/N,open=Array.from({length:N*N},()=>new Set()),boxes=[],walls=[];
+function addWall(x,z,w,d){const m=new THREE.Mesh(new THREE.BoxGeometry(w,WH,d),M(0x556677));m.position.set(x,WH/2,z);scene.add(m);const b={x,z,w,d};boxes.push(b);walls.push({m,b,o:Math.abs(x)>=R||Math.abs(z)>=R})}
+const cc=(i,j)=>[-R+(i+.5)*CS,-R+(j+.5)*CS];
+const cellOf=(x,z)=>Math.max(0,Math.min(N-1,Math.floor((x+R)/CS)))+N*Math.max(0,Math.min(N-1,Math.floor((z+R)/CS)));
+const nb=c=>{const i=c%N,j=(c/N)|0,r=[];if(i>0)r.push(c-1);if(i<N-1)r.push(c+1);if(j>0)r.push(c-N);if(j<N-1)r.push(c+N);return r};
+function buildMaze(rnd){open.forEach(s=>s.clear());walls.forEach(w=>scene.remove(w.m));walls.length=0;boxes.length=0;const seen=new Set([0]),st=[0];while(st.length){const c=st[st.length-1],cand=nb(c).filter(x=>!seen.has(x));
+if(!cand.length){st.pop();continue}const n=cand[(rnd()*cand.length)|0];open[c].add(n);open[n].add(c);seen.add(n);st.push(n)}
+for(let k=0;k<14;k++){const c=(rnd()*N*N)|0,l=nb(c),n=l[(rnd()*l.length)|0];open[c].add(n);open[n].add(c)}
+for(let c=0;c<N*N;c++)if(open[c].size<2){const l=nb(c).filter(x=>!open[c].has(x)),n=l[(rnd()*l.length)|0];open[c].add(n);open[n].add(c)}
+for(let c=0;c<N*N;c++){const i=c%N,j=(c/N)|0;
+if(i<N-1&&!open[c].has(c+1))addWall(-R+(i+1)*CS,-R+(j+.5)*CS,.8,CS+.8);
+if(j<N-1&&!open[c].has(c+N))addWall(-R+(i+.5)*CS,-R+(j+1)*CS,CS+.8,.8)}
+addWall(0,-R,R*2+.8,.8);addWall(0,R,R*2+.8,.8);addWall(-R,0,.8,R*2+.8);addWall(R,0,.8,R*2+.8)}
+buildMaze(Math.random);
+[].map(([x,z,w,d])=>{
+  return 0});
+function human(col,sword){
+  const g=new THREE.Group();
+  const body=new THREE.Mesh(new THREE.BoxGeometry(.6,.9,.35),M(col));body.position.y=1.15;g.add(body);
+  const head=new THREE.Mesh(new THREE.SphereGeometry(.2,12,10),M(0xffd9b0));head.position.y=1.8;g.add(head);
+  [-.15,.15].forEach(x=>{const l=new THREE.Mesh(new THREE.BoxGeometry(.2,.7,.2),M(0x222233));l.position.set(x,.35,0);g.add(l)});
+  const arm=new THREE.Group();arm.position.set(.4,1.5,0);
+  const a=new THREE.Mesh(new THREE.BoxGeometry(.15,.15,.7),M(col));a.position.z=-.3;arm.add(a);
+  const it=sword?new THREE.Mesh(new THREE.BoxGeometry(.06,.06,1.1),M(0xdddddd)):new THREE.Mesh(new THREE.BoxGeometry(.1,.14,.5),M(0x111111));
+  it.position.set(0,0,-.9);if(sword)it.position.z=-1;arm.add(it);g.add(arm);g.userData.arm=arm;return g}
+const me=human(0x3a8dff,false);scene.add(me);
+me.userData.arm.children[0].material.color.set(0xffee00);me.userData.arm.children[0].material.emissive.set(0x886600);
+me.userData.arm.children[1].material.color.set(0xff6600);me.userData.arm.children[1].material.emissive.set(0xaa3300);
+me.userData.arm.children[0].scale.set(1.8,1.8,1);me.userData.arm.children[1].scale.set(1.8,1.8,1);
+const laser=new THREE.Mesh(new THREE.CylinderGeometry(.015,.015,30,6),new THREE.MeshBasicMaterial({color:0xff2222}));
+laser.rotation.x=Math.PI/2;laser.position.set(.4,1.5,-1.15-15);me.add(laser);
+const camObj=new THREE.Mesh(new THREE.BoxGeometry(.5,.35,.4),M(0xffcc00));scene.add(camObj);
+const lens=new THREE.Mesh(new THREE.CylinderGeometry(.1,.1,.2,10),M(0x111111));lens.rotation.x=Math.PI/2;lens.position.z=-.28;camObj.add(lens);
+let P,holding,camPos,camYaw,enemies,bullets,wave,score,over,started,lastShot,tipT;
+const keys={};let beamT=0,beamCd=0,dirt=0,tLeft=180,mode='cpu',mazeOn=true,eb=[],auto=false,placedT=0,knifeCd=0,knifeT=0,net=null,peersL=[],myId=null,hostId=null,remotes=new Map(),orbs=[],orbId=0,orbT=30,dealt=0,pvpOn=false,armV=0,flashCd=0,whiteT=0,hadRem=false,sendT=0,fxT={atk:0,spd:0,clean:0,arm:0,narrow:0,imm:0,slow:0,scan:0};
+function reset(){
+  P={x:-R+CS/2,z:R-CS/2,yaw:0,pitch:0,hp:5};holding=true;camPos=new THREE.Vector3();camYaw=0;
+  (enemies||[]).forEach(e=>scene.remove(e.g));(bullets||[]).forEach(b=>scene.remove(b.m));
+  enemies=[];bullets=[];wave=0;score=0;over=false;lastShot=0;tipT=0;beamT=beamCd=0;auto=false;dirt=0;tLeft=180;nextWave()}
+function nextPt(fx,fz,tx,tz){const tc=cellOf(tx,tz),fc=cellOf(fx,fz);if(!mazeOn||tc===fc)return[tx,tz];
+  const d=new Array(N*N).fill(999);d[tc]=0;const q=[tc];for(let h=0;h<q.length;h++){const c=q[h];for(const n of open[c])if(d[n]>d[c]+1){d[n]=d[c]+1;q.push(n)}}
+  let b=fc;for(const n of open[fc])if(d[n]<d[b])b=n;return cc(b%N,(b/N)|0)}
+function setMaze(on){mazeOn=on;boxes.length=0;walls.forEach(w=>{const a=on||w.o;w.m.visible=a;if(a)boxes.push(w.b)})}
+function spawnBoss(){const t=Math.random()<.5?'gun':'rush',g=human(t==='gun'?0x8e44ad:0xe67e22,t!=='gun');g.scale.setScalar(1.6);const x=0,z=P.z>0?-15:15;g.position.set(x,0,z);scene.add(g);enemies.push({g,x,z,hp:t==='gun'?12:10,cd:2,sw:0,t:0,boss:t});$('tip').textContent='ボス出現!('+(t==='gun'?'銃使い':'足が速い格闘型')+')';tipT=3}
+function nextWave(){if(mode==='pvp')return;wave++;const boss=wave%2===0;setMaze(!boss);eb.forEach(b=>scene.remove(b.m));eb=[];if(wave>1&&!boss){P.x=-R+CS/2;P.z=R-CS/2;holding=true}if(boss){spawnBoss();return}const n=3+wave;
+  for(let i=0;i<n;i++){let x,z;do{[x,z]=cc((Math.random()*N)|0,(Math.random()*N)|0)}while(Math.hypot(x-P.x,z-P.z)<14);
+    const g=human(0xc0392b,true);g.position.set(x,0,z);scene.add(g);enemies.push({g,x,z,hp:1,cd:1+Math.random(),sw:0,t:Math.random()*6})}}
+function hitBox(x,z,r){return boxes.some(b=>Math.abs(x-b.x)<b.w/2+r&&Math.abs(z-b.z)<b.d/2+r)}
+function push(o,r){o.x=Math.max(-R+r,Math.min(R-r,o.x));o.z=Math.max(-R+r,Math.min(R-r,o.z));
+  for(const b of boxes){const dx=o.x-b.x,dz=o.z-b.z,ox=b.w/2+r-Math.abs(dx),oz=b.d/2+r-Math.abs(dz);
+    if(ox>0&&oz>0){if(ox<oz)o.x+=Math.sign(dx||1)*ox;else o.z+=Math.sign(dz||1)*oz}}}
+function toggleCam(){
+  if(over)return;
+  if(holding){const fx=-Math.sin(P.yaw),fz=-Math.cos(P.yaw);
+    const o={x:P.x-fx*2,z:P.z-fz*2};push(o,.5);camPos.set(o.x,.35,o.z);camYaw=P.yaw;holding=false;placedT=0;
+    P.pitch=0}
+  else if(Math.hypot(P.x-camPos.x,P.z-camPos.z)<3){holding=true;P.yaw=camYaw;P.pitch=0;try{ren.domElement.requestPointerLock()}catch(e){}}
+  else{$('tip').textContent='カメラに近づいてからCで拾えます';tipT=2}}
+addEventListener('keydown',e=>{keys[e.code]=1;if(e.code==='KeyC'&&started)toggleCam();if(e.code==='KeyF'&&started)flash();if(spectating()){if(e.code==='ArrowRight')specI++;if(e.code==='ArrowLeft')specI--}});
+addEventListener('keyup',e=>keys[e.code]=0);
+let mX=innerWidth/2,mY=innerHeight/2;
+addEventListener('mousemove',e=>{mX=e.clientX;mY=e.clientY;if(started&&!over&&document.pointerLockElement){P.yaw-=e.movementX*.0025;P.pitch=Math.max(-1.4,Math.min(1.4,P.pitch-e.movementY*.0025))}});
+function sp2(a,b,r,w){let dx=b.x-a.x,dz=b.z-a.z,d=Math.hypot(dx,dz);if(d>=r)return;if(d<.001){dx=1;dz=0;d=1}const o=r-d,nx=dx/d,nz=dz/d;a.x-=nx*o*w;a.z-=nz*o*w;b.x+=nx*o*(1-w);b.z+=nz*o*(1-w)}
+function sep(){const rs=e=>e.boss?.8:.4;
+  for(let i=0;i<enemies.length;i++){const a=enemies[i];for(let j=i+1;j<enemies.length;j++){const b=enemies[j];sp2(a,b,rs(a)+rs(b),.5)}sp2(a,P,rs(a)+.4,.5)}
+  enemies.forEach(e=>{push(e,rs(e));e.g.position.set(e.x,0,e.z)});if(pvpOn)remotes.forEach(r=>sp2(P,r,.8,1));push(P,.4)}
+function knife(){if(!started||over||!holding||knifeCd>0)return;knifeCd=.5;knifeT=.25;const fx=-Math.sin(P.yaw),fz=-Math.cos(P.yaw);
+  enemies.forEach(e=>{const dx=e.x-P.x,dz=e.z-P.z,d=Math.hypot(dx,dz);if(d<(e.boss?1.4:.9)&&(dx*fx+dz*fz)/(d||1)>.3)e.hp-=.5});if(pvpOn)for(const[id,r]of remotes){const dx=r.x-P.x,dz=r.z-P.z,d=Math.hypot(dx,dz);if(r.al!==0&&d<.9&&(dx*fx+dz*fz)/(d||1)>.3)dmgTo(id,.5)}}
+function laserOn(){if(!started||over||holding||beamT>0||beamCd>0)return;beamT=1;beamCd=3}
+function shoot(){const t=performance.now()/1000;if(!started||over||holding||t-lastShot<.25)return;lastShot=t;
+  const dx=-Math.sin(P.yaw),dz=-Math.cos(P.yaw);
+  const m=new THREE.Mesh(new THREE.SphereGeometry(.12,8,8),new THREE.MeshBasicMaterial({color:0xffee55}));
+  me.updateMatrixWorld(true);m.position.copy(me.localToWorld(new THREE.Vector3(.4,1.5,-1.15)));scene.add(m);bullets.push({m,dx,dz,life:1.5});if(net&&pvpOn)net.emit('b',{x:m.position.x,z:m.position.z,dx,dz})}
+addEventListener('contextmenu',e=>e.preventDefault());
+addEventListener('mousedown',ev=>{if(!started)return;
+  if(!document.pointerLockElement&&ren.domElement.requestPointerLock)try{ren.domElement.requestPointerLock()}catch(e){}
+  if(over){if(mode==='pvp'){specI++;return}$('msg').style.display='none';reset();return}if(ev.button===2)laserOn();else if(holding)knife();else shoot()});
+function hurt(){P.hp--;$('flash').style.opacity=.5;setTimeout(()=>$('flash').style.opacity=0,200);
+  if(P.hp<=0){over=true;$('msg').innerHTML='<h1>'+(tLeft<=0?'タイムアップ':'ゲームオーバー')+'</h1><div>ウェーブ '+wave+' / スコア '+score+'</div><p>クリックでリトライ</p>';$('msg').style.display='flex';if(document.exitPointerLock)document.exitPointerLock()}}
+let prev=performance.now();reset();
+$('bCpu').onclick=()=>{started=true;mode='cpu';$('msg').style.display='none';try{ren.domElement.requestPointerLock()}catch(e){}};
+$('bPvp').onclick=()=>{$('lobby').style.display='block'};
+const rng=s=>()=>{s|=0;s=s+0x6D2B79F5|0;let t=Math.imul(s^s>>>15,1|s);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296};
+const toast=t=>{const e=$('toast');e.textContent=t;e.style.opacity=1;clearTimeout(toast.h);toast.h=setTimeout(()=>e.style.opacity=0,2500)};
+const send=k=>net&&net.emit('fx',{k});
+const FX=[['HPを1回復',()=>{P.hp=Math.min(10,P.hp+1)}],['攻撃力2倍(15秒)',()=>fxT.atk=15],['移動速度1.5倍(10秒)',()=>fxT.spd=10],['カメラが曇らない(30秒)',()=>fxT.clean=30],['アーマー獲得(20秒)',()=>{armV=2;fxT.arm=20}],['体の横幅が半分(60秒)',()=>fxT.narrow=60],['相手のカメラ視点の移動を遅く(15秒)',()=>send('slow')],['相手のカメラを曇らせた',()=>send('dirty')],['フラッシュ無効(1分)',()=>fxT.imm=60],['相手のカメラを強制設置',()=>send('drop')],['相手の位置を表示(5秒)',()=>fxT.scan=5]];
+function dmgTo(id,d){const v=d*(fxT.atk>0?2:1);dealt+=v;net.emit('dmg',{to:id,d:v})}
+function pvpHit(d){if(over)return;if(armV>0&&fxT.arm>0){const a=Math.min(armV,d);armV-=a;d-=a}P.hp-=d;$('flash').style.opacity=.5;setTimeout(()=>$('flash').style.opacity=0,200);
+  if(P.hp<=0){P.hp=0;over=true;toast('撃破されました! 観戦モード(左クリックで切替)')}}
+function flash(){if(!pvpOn||!holding||over||flashCd>0)return;flashCd=60;net.emit('fl',{x:P.x,z:P.z,yaw:P.yaw});toast('フラッシュ!')}
+function flashSeen(o){if(fxT.imm>0||over)return;const vx=holding?P.x:camPos.x,vz=holding?P.z:camPos.z,vy=holding?P.yaw:camYaw,dx=o.x-vx,dz=o.z-vz,d=Math.hypot(dx,dz);if(d<.01)return;if(dx*Math.sin(o.yaw||0)+dz*Math.cos(o.yaw||0)<=0)return;if((dx*-Math.sin(vy)+dz*-Math.cos(vy))<=0)return;cam.updateMatrixWorld(true);if(![.3,1.2,1.9].some(y=>{const p=new THREE.Vector3(o.x,y,o.z).project(cam);return p.z<1&&Math.abs(p.x)<1&&Math.abs(p.y)<1}))return;const nx=-dz/d,nz=dx/d;let seen=false;for(const off of[0,-.5,.5]){const tx=o.x+nx*off,tz=o.z+nz*off,ex=tx-vx,ez=tz-vz,e=Math.hypot(ex,ez)||1;let ok=true;for(let t=0;t<e;t+=.25)if(hitBox(vx+ex/e*t,vz+ez/e*t,0)){ok=false;break}if(ok){seen=true;break}}if(seen)whiteT=2}
+function startPvp(d){mode='pvp';hostId=d.host;orbs.forEach(o=>scene.remove(o.m));orbs.length=0;dealt=0;armV=0;flashCd=0;whiteT=0;ended=false;resShown=false;startT=performance.now();specI=0;for(const k in fxT)fxT[k]=0;$('msg').style.pointerEvents='auto';$('msg').style.background='rgba(0,0,0,.72)';WH=4;buildMaze(rng(d.seed));setMaze(true);reset();order=d.order;const i=Math.max(0,d.order.indexOf(myId)),[ci,cj]=[[0,N-1],[N-1,0],[N-1,N-1],[0,0]][i%4],[sx,sz]=cc(ci,cj);P.x=sx;P.z=sz;P.hp=10;me.children[0].material.color.set(COLS[i%4]);tLeft=600;orbT=30;pvpOn=true;started=true;$('msg').style.display='none';$('mm').style.display='block';try{ren.domElement.requestPointerLock()}catch(e){}}
+function pvpEndOld(win){over=true;ended=true;const L=[[myName||'あなた',P.hp+dealt/2],...[...remotes.values()].map((r,i)=>[r.nm||'相手'+(i+1),+r.sc||0])].sort((a,b)=>b[1]-a[1]);
+  $('msg').innerHTML='<h1>'+(win?'勝利!':'試合終了')+'</h1><div>'+L.map(x=>x[0]+': '+x[1].toFixed(1)).join('<br>')+'</div><p>勝者: '+L[0][0]+'</p><p>再読み込みでメニューに戻れます</p>';$('msg').style.display='flex';$('msg').style.pointerEvents='auto';$('msg').style.background='rgba(0,0,0,.72)'}
+const COLS=[0x3a8dff,0x2ecc71,0xf1c40f,0xe84393];let order=[],myName='',meLab=null,specI=0,ended=false;
+const spectating=()=>pvpOn&&P.hp<=0;
+const specTarget=()=>{let l=[...remotes.values()].filter(r=>r.al!==0);if(!l.length)l=[...remotes.values()];return l.length?l[((specI%l.length)+l.length)%l.length]:null};
+function specLabel(){const t=specTarget();return '👁 観戦中: '+((t&&t.nm)||'相手')+'(左クリックで切替)'}
+function label(t){const c=document.createElement('canvas');c.width=256;c.height=64;const x=c.getContext('2d');x.font='bold 36px sans-serif';x.textAlign='center';x.fillStyle='#fff';x.strokeStyle='#000';x.lineWidth=6;x.strokeText(t,128,44);x.fillText(t,128,44);const s=new THREE.Sprite(new THREE.SpriteMaterial({map:new THREE.CanvasTexture(c),transparent:true}));s.scale.set(1.8,.45,1);scene.add(s);return s}
+let resShown=false,startT=0,resTimer=0;
+function board(){const L=[{id:myId,nm:myName||'あなた',sc:P.hp+dealt/2},...[...remotes].map(([id,r])=>({id,nm:r.nm||'相手',sc:+r.sc||0}))];L.sort((a,b)=>b.sc-a.sc||(a.id<b.id?-1:1));return L}
+function emitRes(win){const L=board(),w=win||L[0].id,data={win:w,list:L.map(x=>[x.nm,+x.sc.toFixed(1)]),wn:(L.find(x=>x.id===w)||L[0]).nm};try{net.emit('res',data)}catch(e){}showRes(data);[1000,2500,4500].forEach(t=>setTimeout(()=>{try{net.emit('res',data)}catch(e){}},t))}
+function showRes(d){if(resShown)return;resShown=true;over=true;ended=true;clearTimeout(resTimer);hostId=d.win;if(document.exitPointerLock)document.exitPointerLock();
+  const m=$('msg');m.innerHTML='<h1>試合終了</h1><div>'+d.list.map(x=>x[0]+': '+x[1]).join('<br>')+'</div><p>勝者: '+d.wn+'</p>'+(myId===d.win?'<button id="bAgain">もう一戦</button>':'<p>勝者(ホスト)の開始待ち…</p>');m.style.display='flex';m.style.pointerEvents='auto';m.style.background='rgba(0,0,0,.72)';
+  if(myId===d.win)$('bAgain').onclick=()=>net.emit('go',{seed:(Math.random()*1e6|0)+1,host:myId,order:peersL.map(p=>p.peer).sort()})}
+function pvpEnd(win){if(ended)return;over=true;ended=true;const m=$('msg');m.innerHTML='<h1>'+(win?'勝利!':'時間切れ')+'</h1><div>集計中…</div>';m.style.display='flex';m.style.pointerEvents='none';m.style.background='rgba(0,0,0,.35)';
+  if(win)emitRes(myId);else if(myId===hostId)setTimeout(()=>emitRes(),300);else resTimer=setTimeout(()=>{if(!resShown){const L=board();showRes({win:L[0].id,list:L.map(x=>[x.nm,+x.sc.toFixed(1)]),wn:L[0].nm})}},3000)}
+function addHands(g){const a=g.userData.arm,k=new THREE.Group(),bl=new THREE.Mesh(new THREE.BoxGeometry(.03,.02,.4),new THREE.MeshLambertMaterial({color:0xd8dde3,emissive:0x3a3f45})),hd=new THREE.Mesh(new THREE.BoxGeometry(.04,.04,.14),new THREE.MeshLambertMaterial({color:0x2b1d14}));bl.position.z=-.85;hd.position.z=-.6;k.add(bl,hd);a.add(k);g.userData.knife=k;
+  const c=camObj.clone();c.visible=true;c.position.set(-.35,1.3,-.35);c.scale.setScalar(.9);g.add(c);g.userData.cam=c}
+function hands(g,h){g.userData.arm.children[1].visible=!h;g.userData.knife.visible=!!h;g.userData.cam.visible=!!h}
+function spawnOrb(){let x,z,n=0;do{[x,z]=cc((Math.random()*N)|0,(Math.random()*N)|0)}while(n++<30&&(Math.hypot(x-P.x,z-P.z)<14||[...remotes.values()].some(r=>Math.hypot(x-r.x,z-r.z)<14)));net.emit('orb',{id:++orbId,x,z})}
+function pvpInfo(){return '残り '+Math.max(0,tLeft|0)+'秒 / 与ダメ '+dealt.toFixed(1)+' / 生存 '+(1+[...remotes.values()].filter(r=>r.al!==0).length)+'人 / '+(beamT>0?'レーザー中':beamCd>0?'充填中':'レーザーOK')}
+function takeOrb(id){const i=orbs.findIndex(o=>o.id===id);if(i>=0){scene.remove(orbs[i].m);orbs.splice(i,1)}}
+function mini(){const c=$('mm'),x=c.getContext('2d'),s=176/(R*2),dot=(px,pz,col)=>{x.fillStyle=col;x.beginPath();x.arc((px+R)*s,(pz+R)*s,4,0,7);x.fill()};x.clearRect(0,0,176,176);x.fillStyle='rgba(0,0,0,.55)';x.fillRect(0,0,176,176);x.fillStyle='#8aa';boxes.forEach(b=>x.fillRect((b.x-b.w/2+R)*s,(b.z-b.d/2+R)*s,b.w*s,b.d*s));
+  orbs.forEach(o=>dot(o.x,o.z,'#6df'));if(fxT.scan>0)remotes.forEach(r=>{if(r.al!==0)dot(r.x,r.z,'#f55')});dot(P.x,P.z,'#ff0');x.strokeStyle='#ff0';x.beginPath();x.moveTo((P.x+R)*s,(P.z+R)*s);x.lineTo((P.x-Math.sin(P.yaw)*2+R)*s,(P.z-Math.cos(P.yaw)*2+R)*s);x.stroke()}
+function pvpTick(dt){const ids=new Set(),st=spectating()?specTarget():null;if(myName&&!meLab)meLab=label(myName);if(meLab){meLab.visible=!holding&&P.hp>0;meLab.position.set(P.x,2.5,P.z)}if(myId===hostId&&!ended&&(orbT-=dt)<=0){orbT=30;spawnOrb()}if(over&&!ended&&P.hp<=0&&(tLeft-=dt)<=0)pvpEnd();
+  for(const p of peersL){if(p.isMe)continue;ids.add(p.peer);let r=remotes.get(p.peer);
+    if(!r){const g=human(COLS[Math.max(0,order.indexOf(p.peer))%4],false);addHands(g);scene.add(g);r={g,x:p.presence.x||0,z:p.presence.z||0,yaw:0};remotes.set(p.peer,r)}
+    const s=p.presence;if(s.x!=null){const k=Math.min(1,dt*12);r.x+=(s.x-r.x)*k;r.z+=(s.z-r.z)*k;r.yaw=s.yaw||0;r.pt=s.pt||0}r.al=s.al;r.sc=s.sc;r.sw=s.sw;hands(r.g,s.h);if(s.c===1){if(!r.cm){r.cm=camObj.clone();scene.add(r.cm)}r.cm.visible=true;r.cm.position.set(s.cx,.2,s.cz);r.cm.rotation.y=s.cyw||0}else if(r.cm)r.cm.visible=false;if(s.nm&&r.nm!==s.nm){r.nm=s.nm;if(r.lab)scene.remove(r.lab);r.lab=label(s.nm)}if(r.lab){r.lab.visible=r.al!==0&&r!==st;r.lab.position.set(r.x,2.5,r.z)}r.g.visible=r.al!==0&&r!==st;r.g.position.set(r.x,0,r.z);r.g.rotation.y=r.yaw;r.g.scale.x=r.sw?.5:1}
+  for(const[id,r]of remotes)if(!ids.has(id)){scene.remove(r.g);if(r.cm)scene.remove(r.cm);if(r.lab)scene.remove(r.lab);remotes.delete(id)}
+  if(remotes.size)hadRem=true;
+  if(!over){if(hadRem&&performance.now()-startT>2500&&![...remotes.values()].some(r=>r.al!==0))pvpEnd(true);
+    if(false){orbT=30;let x,z,n=0;do{[x,z]=cc((Math.random()*N)|0,(Math.random()*N)|0)}while(n++<30&&(Math.hypot(x-P.x,z-P.z)<14||[...remotes.values()].some(r=>Math.hypot(x-r.x,z-r.z)<14)));net.emit('orb',{id:++orbId,x,z})}
+    for(const o of orbs)if(Math.hypot(o.x-P.x,o.z-P.z)<1.1){takeOrb(o.id);net.emit('take',{id:o.id});const f=FX[(Math.random()*FX.length)|0];f[1]();toast('獲得: '+f[0]);break}}
+  orbs.forEach(o=>o.m.position.y=1.2+Math.sin(performance.now()/400+o.id)*.15);
+  whiteT=Math.max(0,whiteT-dt);$('wh').style.opacity=Math.min(1,whiteT/.3);
+  if((sendT-=dt)<=0){sendT=.066;net.presence({x:+P.x.toFixed(2),z:+P.z.toFixed(2),yaw:+P.yaw.toFixed(2),al:P.hp>0?1:0,sw:fxT.narrow>0?1:0,nm:myName,pt:+(holding?P.pitch:0).toFixed(2),h:holding?1:0,c:holding?0:1,cx:+camPos.x.toFixed(2),cz:+camPos.z.toFixed(2),cyw:+camYaw.toFixed(2),sc:+(P.hp+dealt/2).toFixed(1)})}
+  $('fx').innerHTML=Object.entries({atk:'攻撃化2倍',spd:'速度1.5倍',clean:'曇り無効',arm:'アーマー',narrow:'細身',imm:'フラッシュ無効',slow:'移動低下',scan:'索敵'}).filter(([k])=>fxT[k]>0).map(([k,n])=>n+' '+(fxT[k]|0)+'秒').concat(['F: フラッシュ '+(flashCd>0?(flashCd|0)+'秒':'OK')]).join('<br>');
+  mini()}
+function mqttRoom(){return{async join(name){
+  const me='p'+Math.random().toString(36).slice(2,9),base='camshoot26/'+name+'/',cl=mqtt.connect('wss://broker.emqx.io:8084/mqtt'),hs={},peers=new Map();let cb=null,mine={};
+  await new Promise((ok,ng)=>{cl.once('connect',ok);cl.once('error',ng);setTimeout(()=>ng(new Error('timeout')),8000)});
+  cl.subscribe(base+'#',{qos:1});
+  const pub=(k,o,q)=>cl.publish(base+k,JSON.stringify(o),{qos:q||0}),
+  notify=()=>{if(!cb)return;const now=Date.now();for(const[k,v]of peers)if(now-v.t>4000)peers.delete(k);cb({peers:[{peer:me,isMe:true,sameTab:true,presence:mine},...[...peers.values()].map(v=>({peer:v.id,isMe:false,sameTab:false,presence:v.p}))],joined:[],left:[],updated:[]})};
+  cl.on('message',(t,buf)=>{let m;try{m=JSON.parse(buf.toString())}catch(e){return}const k=t.slice(base.length);
+    if(k==='pres'){if(m.id!==me){peers.set(m.id,{id:m.id,p:m.p,t:Date.now()});notify()}}
+    else if(hs[k])hs[k]({topic:k,data:m.d,peer:m.id,isMe:m.id===me,sameTab:m.id===me})});
+  setInterval(()=>{pub('pres',{id:me,p:mine});notify()},1000);
+  return{emit:(k,d)=>{pub(k,{id:me,d},1);return Promise.resolve()},on:(k,h)=>{hs[k]=h;return()=>delete hs[k]},presence:p=>{mine={...mine,...p};pub('pres',{id:me,p:mine});return Promise.resolve()},onPeers:h=>{cb=h;notify();return()=>{cb=null}}}}}}
+async function enter(code,host){const L=$('lobbyMsg');myName=$('pname').value.trim().slice(0,8);if(!myName){L.textContent='名前を入力してください';return}const r=(window.claude&&await claude.use('room'))||(window.mqtt&&mqttRoom());if(!r){L.textContent='この環境では対人(オンライン)は使えません';return}
+  try{const g=await r.join('g'+code);net=g;
+    g.onPeers(c=>{peersL=c.peers;const me=c.peers.find(p=>p.isMe&&p.sameTab);if(me)myId=me.peer;L.textContent='部屋コード: '+code+' / 参加人数: '+c.peers.length+'人'+(host?(c.peers.length>1?'':' (2人以上で開始できます)'):' (ホストの開始待ち)');$('bGo').style.display=host&&c.peers.length>1&&!pvpOn?'inline-block':'none'});
+    g.on('go',m=>startPvp(m.data));g.on('dmg',m=>{if(m.data.to===myId)pvpHit(m.data.d)});
+    g.on('b',m=>{if(m.isMe||!pvpOn)return;const d=m.data,s=new THREE.Mesh(new THREE.SphereGeometry(.12,8,8),new THREE.MeshBasicMaterial({color:0xff8855}));s.position.set(d.x,1.5,d.z);scene.add(s);bullets.push({m:s,dx:d.dx,dz:d.dz,life:1.5,v:1})});
+    g.on('orb',m=>{const d=m.data,s=new THREE.Mesh(new THREE.SphereGeometry(.5,16,12),new THREE.MeshLambertMaterial({color:0x66ddff,emissive:0x2266aa,transparent:true,opacity:.45}));s.position.set(d.x,1.2,d.z);scene.add(s);orbs.push({id:d.id,x:d.x,z:d.z,m:s})});
+    g.on('take',m=>takeOrb(m.data.id));g.on('res',m=>showRes(m.data));g.on('fl',m=>{if(!m.isMe)flashSeen(m.data)});
+    g.on('fx',m=>{if(m.isMe)return;const k=m.data.k;if(k==='slow')fxT.slow=15;else if(k==='dirty'&&fxT.clean<=0)dirt=Math.max(dirt,.9);else if(k==='drop'&&holding)toggleCam()});
+    g.presence({al:1,sc:10,nm:myName});
+    $('bGo').onclick=()=>{if(peersL.length>1)g.emit('go',{seed:+code||1,host:myId,order:peersL.map(p=>p.peer).sort()})}
+  }catch(e){L.textContent='接続に失敗しました'}}
+async function enterOld(code){const L=$('lobbyMsg'),r=window.claude&&await claude.use('room');if(!r){L.textContent='この環境では対人(オンライン)は使えません';return}
+  try{const g=await r.join('g'+code);g.onPeers(c=>{L.textContent='部屋コード: '+code+' / 参加人数: '+c.peers.length+'人(対人戦の本体は準備中)'});g.presence({ready:true})}catch(e){L.textContent='接続に失敗しました'}}
+$('bMake').onclick=()=>{const c=String(Math.floor(Math.random()*1e6)).padStart(6,'0');$('code').value=c;enter(c,true)};
+$('bJoin').onclick=()=>{const c=$('code').value.trim();if(!/^\d{6}$/.test(c)){$('lobbyMsg').textContent='6桁の数字を入力してください';return}enter(c,false)};
+function loop(now){requestAnimationFrame(loop);const dt=Math.min(.05,(now-prev)/1000);prev=now;
+  if(started&&!over){
+    for(const k in fxT)fxT[k]=Math.max(0,fxT[k]-dt);flashCd=Math.max(0,flashCd-dt);knifeCd=Math.max(0,knifeCd-dt);beamT=Math.max(0,beamT-dt);beamCd=Math.max(0,beamCd-dt);dirt=holding?Math.max(0,dirt-dt/6):((placedT+=dt)>5?Math.min(1,dirt+dt/15):dirt);if(fxT.clean>0)dirt=0;if((tLeft-=dt)<=0){if(mode==='pvp')pvpEnd();else{P.hp=1;hurt()}}
+    if(keys.ArrowLeft)P.yaw+=2*dt;if(keys.ArrowRight)P.yaw-=2*dt;
+    if(keys.ArrowUp)P.pitch=Math.min(1.4,P.pitch+1.5*dt);if(keys.ArrowDown)P.pitch=Math.max(-1.4,P.pitch-1.5*dt);
+    if(false){const rv=new THREE.Vector3(mX/innerWidth*2-1,-(mY/innerHeight)*2+1,.5).unproject(cam).sub(cam.position).normalize();let tx,tz;
+      if(rv.y<-.02){const t=-cam.position.y/rv.y;tx=cam.position.x+rv.x*t;tz=cam.position.z+rv.z*t}else{tx=cam.position.x+rv.x*40;tz=cam.position.z+rv.z*40}
+      P.yaw=Math.atan2(-(tx-P.x),-(tz-P.z))}
+    if(keys.Space&&!holding)shoot();
+    const f=(keys.KeyW?1:0)-(keys.KeyS?1:0),r=(keys.KeyD?1:0)-(keys.KeyA?1:0);
+    const by=holding?P.yaw:camYaw; // 移動基準: 持っている時は自分の向き、置いた後はカメラの向き
+    let mx=-Math.sin(by)*f+Math.cos(by)*r,mz=-Math.cos(by)*f-Math.sin(by)*r;const l=Math.hypot(mx,mz);
+    if(holding)auto=false;else if(dirt>=.999)auto=true;
+    if(auto&&!holding){tipT=.3;$('tip').textContent='カメラが見えません。自動で回収中…';const[ax0,az0]=nextPt(P.x,P.z,camPos.x,camPos.z),ax=ax0-P.x,az=az0-P.z,al=Math.hypot(ax,az)||1;P.x+=ax/al*5*dt;P.z+=az/al*5*dt;push(P,.4);P.yaw=Math.atan2(-ax,-az);
+      if(Math.hypot(P.x-camPos.x,P.z-camPos.z)<1.2){holding=true;P.yaw=camYaw;P.pitch=0;auto=false}}
+    else if(l){const v=(holding?2.5*(fxT.slow>0?.5:1):5)*(fxT.spd>0?1.5:1);P.x+=mx/l*v*dt;P.z+=mz/l*v*dt;push(P,.4)}
+    if(tipT>0&&(tipT-=dt)<=0)$('tip').textContent='';
+    bullets=bullets.filter(b=>{b.m.position.x+=b.dx*45*dt;b.m.position.z+=b.dz*45*dt;b.life-=dt;
+      const x=b.m.position.x,z=b.m.position.z;let dead=b.life<=0||Math.abs(x)>R||Math.abs(z)>R||hitBox(x,z,0);
+      for(const e of enemies){if(!dead&&Math.hypot(e.x-x,e.z-z)<(e.boss?1.1:.6)){e.hp--;dead=true;e.g.position.y=0}}
+      if(!dead&&!b.v&&pvpOn)for(const[id,r]of remotes)if(r.al!==0&&Math.hypot(r.x-x,r.z-z)<.6*(r.sw?.5:1)){dead=true;dmgTo(id,1)}
+      if(dead)scene.remove(b.m);return!dead});
+    enemies=enemies.filter(e=>{if(e.hp>0)return true;scene.remove(e.g);score+=e.boss?500:100;return false});
+    const pc=cellOf(P.x,P.z),dist=new Array(N*N).fill(999);dist[pc]=0;{const q=[pc];for(let h=0;h<q.length;h++){const c=q[h];for(const n of open[c])if(dist[n]>dist[c]+1){dist[n]=dist[c]+1;q.push(n)}}}
+    for(const e of enemies){const dx=P.x-e.x,dz=P.z-e.z,d=Math.hypot(dx,dz);e.t+=dt;
+      if(d>(e.boss==='gun'?8:1.4)&&e.sw<=0){const ec=cellOf(e.x,e.z);let tx=P.x,tz=P.z;if(mazeOn&&ec!==pc){let best=ec;for(const n of open[ec])if(dist[n]<dist[best])best=n;[tx,tz]=cc(best%N,(best/N)|0)}
+        const tdx=tx-e.x,tdz=tz-e.z,td=Math.hypot(tdx,tdz)||1,sp=e.boss==='rush'?4.5:1.3+wave*.075;e.x+=tdx/td*sp*dt;e.z+=tdz/td*sp*dt;push(e,.4);e.g.children[2].position.y=.35+Math.abs(Math.sin(e.t*8))*.08}
+      e.g.rotation.y=Math.atan2(-dx,-dz);e.cd-=dt;
+      if(e.boss==='gun'&&d<25&&e.cd<=0){e.cd=1.1;const m=new THREE.Mesh(new THREE.SphereGeometry(.2,8,8),new THREE.MeshBasicMaterial({color:0xff44ff}));m.position.set(e.x,1.5,e.z);scene.add(m);eb.push({m,dx:dx/d,dz:dz/d,life:3})}
+      if(d<1.8&&e.cd<=0&&e.sw<=0&&(!mazeOn||cellOf(e.x,e.z)===pc||open[cellOf(e.x,e.z)].has(pc))){e.sw=.4;e.cd=1.3}
+      if(e.sw>0){e.sw-=dt;e.g.userData.arm.rotation.x=-Math.sin((1-e.sw/.4)*Math.PI)*1.6;
+        if(e.sw<=0){e.g.userData.arm.rotation.x=0;if(Math.hypot(P.x-e.x,P.z-e.z)<2.2)hurt()}}
+      e.g.position.set(e.x,0,e.z)}
+    eb=eb.filter(b=>{b.m.position.x+=b.dx*14*dt;b.m.position.z+=b.dz*14*dt;b.life-=dt;const x=b.m.position.x,z=b.m.position.z;let dead=b.life<=0||hitBox(x,z,0);if(!dead&&Math.hypot(P.x-x,z-P.z)<.6){hurt();dead=true}if(dead)scene.remove(b.m);return!dead});
+    sep();
+    if(mode==='cpu'&&!enemies.length&&!over){nextWave();P.hp=Math.min(5,P.hp+1)}
+  }
+  me.position.set(P.x,0,P.z);me.rotation.y=P.yaw;me.visible=!holding&&!spectating();
+  if(!holding){me.updateMatrixWorld(true);const o=me.localToWorld(new THREE.Vector3(.4,1.5,-1.15)),ldx=-Math.sin(P.yaw),ldz=-Math.cos(P.yaw);let L=0;
+    for(;L<30;L+=.25){const x=o.x+ldx*L,z=o.z+ldz*L,he=enemies.find(e=>Math.hypot(e.x-x,e.z-z)<(e.boss?1:.5));if(hitBox(x,z,0)||he)break}
+    laser.scale.y=Math.max(.01,L/30);laser.visible=beamT>0;laser.position.z=-1.15-L/2}
+  camObj.visible=false;camObj.position.copy(camPos);camObj.rotation.y=camYaw;
+  if(spectating()&&specTarget()){const t=specTarget();cam.position.set(t.x,1.65,t.z);cam.rotation.set(t.pt||0,t.yaw,0)}
+  else if(holding){cam.position.set(P.x,1.65,P.z);cam.rotation.set(P.pitch,P.yaw,0)}
+  else{cam.position.copy(camPos);cam.rotation.set(.12,camYaw,0)}
+  $('cross').style.display='none';if(pvpOn)pvpTick(dt);knifeT=Math.max(0,knifeT-dt);knife3d.visible=holding&&!spectating();const kp=knifeT>0?Math.sin((1-knifeT/.25)*Math.PI):0;knife3d.rotation.set(.45-kp*1.4,.25,-.35+kp*.6);knife3d.position.set(.28-kp*.12,-.25+kp*.05,-.5-kp*.25);const el=Math.max(0,180-tLeft);$('tc').textContent='TC '+String(el/60|0).padStart(2,'0')+':'+String(el%60|0).padStart(2,'0');if(spectating())dirt=0;$('dirt').style.opacity=dirt;$('dirt').style.backdropFilter='blur('+dirt*12+'px)';
+  $('mode').textContent=spectating()?specLabel():holding?'📷 カメラ所持中(銃は使えません)':'🔫 カメラ設置中(射撃OK)';
+  $('hp').textContent='HP '+'♥'.repeat(Math.max(0,P.hp))+'♡'.repeat(Math.max(0,5-P.hp));
+  $('info').textContent=pvpOn?pvpInfo():'残り '+Math.max(0,tLeft|0)+'秒 / ウェーブ '+wave+(wave%2===0?'(ボス)':'')+' / 敵 '+enemies.length+' / スコア '+score+' / '+(beamT>0?'レーザー発射中':beamCd>0?'レーザー充填中':'レーザーOK');
+  if(!tipT)$('tip').textContent=holding?'Cキー: カメラを床に置く / 左クリック: ナイフ(密着して攻撃)':'Cキー: 拾う / 右クリック: 照準レーザー(1秒・再充填2秒) / 左クリック・Space: 射撃';
+  ren.render(scene,cam)}
+requestAnimationFrame(loop);
+</script></body></html>
